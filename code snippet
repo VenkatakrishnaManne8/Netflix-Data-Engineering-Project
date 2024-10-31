@@ -1,1 +1,117 @@
+/bronze/netflix/raw/
 
+PySpark Code for Bronze to Silver Transformation:
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, trim
+
+# Initialize Spark session in Synapse
+spark = SparkSession.builder.getOrCreate()
+
+# Load raw data from Bronze layer
+bronze_df = spark.read.format("csv") \
+               .option("header", "true") \
+               .load("abfss://Bronze@rawad;sgen2.dfs.core.windows.net/bronze/netflix/raw/")
+
+# Clean and transform the data
+silver_df = bronze_df.dropna(subset=["title"]) \
+                     .dropDuplicates() \
+                     .withColumn("title", trim(col("title"))) \
+                     .withColumn("date_added", col("date_added").cast("date")) \
+                     .withColumn("release_year", col("release_year").cast("int"))
+
+# Save to Silver layer
+silver_df.write.format("parquet") \
+               .mode("overwrite") \
+               .save("abfss://Silver@rawadlsgen2.dfs.core.windows.net/silver/netflix/cleaned/")
+
+
+PySpark Code for Silver to Gold Transformation:
+
+# Load cleaned data from Silver layer
+silver_df = spark.read.format("parquet") \
+               .load("abfss://<container>@<storage_account>.dfs.core.windows.net/silver/netflix/cleaned/")
+
+# Transformation examples
+# 1. Count by Genre
+genre_count_df = silver_df.groupBy("listed_in").count()
+
+# 2. Count of Titles by Release Year
+year_count_df = silver_df.groupBy("release_year").count()
+
+# 3. Monthly count of Titles added
+monthly_count_df = silver_df.groupBy("date_format(date_added, 'yyyy-MM')").count()
+
+# Save to Gold layer
+genre_count_df.write.format("parquet") \
+                   .mode("overwrite") \
+                   .save("abfss://Gold@rawadlsgen2.dfs.core.windows.net/gold/netflix/genre_count/")
+
+year_count_df.write.format("parquet") \
+                  .mode("overwrite") \
+                  .save("abfss://Gold@rawadlsgen2.dfs.core.windows.net/gold/netflix/year_count/")
+
+monthly_count_df.write.format("parquet") \
+                      .mode("overwrite") \
+                      .save("abfss://Gold@rawadlsgen2.dfs.core.windows.net/gold/netflix/monthly_count/")
+
+
+
+SQL Script to Create External Tables:
+
+CREATE DATABASE NetflixAnalytics;
+CREATE EXTERNAL DATA SOURCE NetflixDataLake
+WITH (LOCATION = 'abfss://Gold@rawadlsgen2.dfs.core.windows.net');
+
+CREATE EXTERNAL TABLE Netflix_Genre_Count (
+    genre STRING,
+    count INT
+)
+WITH (
+    LOCATION = '/gold/netflix/genre_count/',
+    DATA_SOURCE = NetflixDataLake,
+    FILE_FORMAT = SynapseParquetFormat
+);
+
+CREATE EXTERNAL TABLE Netflix_Year_Count (
+    release_year INT,
+    count INT
+)
+WITH (
+    LOCATION = '/gold/netflix/year_count/',
+    DATA_SOURCE = NetflixDataLake,
+    FILE_FORMAT = SynapseParquetFormat
+);
+
+CREATE EXTERNAL TABLE Netflix_Monthly_Count (
+    month STRING,
+    count INT
+)
+WITH (
+    LOCATION = '/gold/netflix/monthly_count/',
+    DATA_SOURCE = NetflixDataLake,
+    FILE_FORMAT = SynapseParquetFormat
+);
+
+
+
+
+Optimize the Fact Table
+
+SELECT *
+FROM fact_netflix_shows
+WHERE release_year = 2021;
+
+
+
+
+Step 6: Run an Example Query on the Fact Table
+
+SELECT 
+    c.country,
+    f.release_year,
+    COUNT(*) AS num_shows
+FROM fact_netflix_shows f
+JOIN dim_country c ON f.country_id = c.country_id
+GROUP BY c.country, f.release_year
+ORDER BY num_shows DESC;
